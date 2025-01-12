@@ -45,16 +45,25 @@ class GaussianRenderer(nn.Module):
         
         # 4. Transform covariance to camera space and then to 2D
         # Compute Jacobian of perspective projection
-        # See: https://zhuanlan.zhihu.com/p/7833648056
+        # 创建单个矩阵
+        single_J_proj = torch.tensor([
+            [1.0 / t[2], 0.0, -t[0] / t[2] ** 2],
+            [0.0, 1.0 / t[2], -t[1] / t[2] ** 2]
+        ], dtype=torch.float32, device=means3D.device)
+
+        # 扩展到 N 个矩阵
+        #J_proj = single_J_proj.unsqueeze(0).repeat(N, 1, 1) #(N,2,3)
         J_proj: torch.Tensor = torch.stack([torch.tensor([
             [1.0 / t[2], 0.0, -t[0] / t[2] ** 2],
             [0.0, 1.0 / t[2], -t[1] / t[2] ** 2],
         ], dtype=torch.float32)] * N).to(device=means3D.device)
+        ### FILL:
+        ### J_proj = ...
         
         # Transform covariance to camera space
-        ### Apply world to camera rotation to the 3d covariance matrix
-        covs_cam = torch.einsum('ij,njk,kl->nil', R, covs3d, R.T)  # (N, 3, 3)
-        
+        ### FILL: Aplly world to camera rotation to the 3d covariance matrix
+        ### covs_cam = ...  # (N, 3, 3)
+        covs_cam = torch.einsum('ij,njk,kl->nil', R, covs3d, R.T)
         # Project to 2D
         covs2D = torch.bmm(J_proj, torch.bmm(covs_cam, J_proj.permute(0, 2, 1)))  # (N, 2, 2)
         
@@ -77,13 +86,23 @@ class GaussianRenderer(nn.Module):
         covs2D = covs2D + eps * torch.eye(2, device=covs2D.device).unsqueeze(0)
         
         # Compute determinant for normalization
-        #inv_covs2D = torch.inverse(covs2D.cpu())  # 移到 CPU 上
-        #inv_covs2D = inv_covs2D.to(covs2D.device)    # 再转回到原设备（如 GPU）
+        ### FILL: compute the gaussian values
+        ### gaussian = ... ## (N, H, W)
+        # 计算高斯值
+        
+        inv_covs2D = torch.linalg.inv(covs2D.cpu())  # 移到 CPU 上
+        inv_covs2D = inv_covs2D.to(covs2D.device)    # 再转回到原设备（如 GPU）
+
         gaussian: torch.Tensor = torch.einsum(
-            'nhwi,nij,nhwj->nhw', dx, covs2D.inverse(), dx
-        ).mul(-0.5).exp() ## (N, H, W)
-        #dets: torch.Tensor = covs2D[:, 0, 0] * covs2D[:, 1, 1] - covs2D[:, 0, 1] * covs2D[:, 1, 0]
-        #gs_normed: torch.Tensor = gaussian / dets.sqrt().mul(2.0 * torch.pi).reshape((-1, 1, 1))
+            'nhwi,nij,nhwj->nhw', dx,inv_covs2D , dx
+        ).mul(-0.5).exp()  # (N, H, W)
+        # 计算协方差矩阵行列式
+        dets: torch.Tensor = covs2D[:, 0, 0] * covs2D[:, 1, 1] - covs2D[:, 0, 1] * covs2D[:, 1, 0]
+        # 归一化
+        gaussian = gaussian / (2 * np.pi * torch.sqrt(dets)).reshape(-1, 1, 1)
+
+
+    
         return gaussian
 
     def forward(
@@ -121,18 +140,25 @@ class GaussianRenderer(nn.Module):
         # 6. Alpha composition setup
         alphas = opacities.view(N, 1, 1) * gaussian_values  # (N, H, W)
         colors = colors.view(N, 3, 1, 1).expand(-1, -1, self.H, self.W)  # (N, 3, H, W)
-        #print('colors: ', colors.dtype, colors.shape, colors.max())
         colors = colors.permute(0, 2, 3, 1)  # (N, H, W, 3)
-        
+        #print('colors: ', colors.dtype, colors.shape, colors.max())
+
         # 7. Compute weights
-        #transmissions: torch.Tensor = torch.ones_like(opacities)
-        #transmissions[1:] = 1.0 - opacities[:-1]
-        #weights = alphas * transmissions.cumprod(dim=0).reshape((-1, 1, 1)) # (N, H, W)
-        weights = alphas
+        ### FILL:
+        ### weights = ... # (N, H, W)
+        T = torch.cumprod(1 - alphas, dim=0)  # (N, H, W)
+        N, H, W = T.shape  # 获取 T 的维度
+
+        T = torch.cat([torch.ones(1, H, W, device=T.device), T[:-1]], dim=0)
+        weights = alphas * T #(N,H,W)
+    #    weights = alphas #(N,H,W)
+
+
+
         #print('weights: ', weights.dtype, weights.shape, weights.max())
+
         # 8. Final rendering
         rendered = (weights.unsqueeze(-1) * colors).sum(dim=0)  # (H, W, 3)
         #print('rendered: ', rendered.dtype, rendered.shape, rendered.max())
-        #import os
-        #os._exit(19)
+        
         return rendered
